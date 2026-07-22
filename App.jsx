@@ -166,6 +166,68 @@ const FEELINGS = [
   { id: "hambre", emoji: "\u{1F61F}", label: "Con hambre", desc: "Me cuesta seguirlo", color: "#EF4444" },
 ];
 
+
+// ============================================================
+//  FRASES MOTIVACIONALES CONTEXTUALES
+//  Se eligen segun la fase real del progreso, no al azar.
+//  Rotan por dia para no repetir la misma dos veces seguidas.
+// ============================================================
+const PHRASES = {
+  sinMeta: [
+    "Define tu meta. Lo que se mide, se logra.",
+    "Un objetivo claro convierte el esfuerzo en direccion.",
+    "Ponle nombre a tu destino y el camino se ordena solo.",
+  ],
+  inicio: [
+    "Empezar ya te pone por delante de quien solo lo piensa.",
+    "Los primeros dias construyen el habito. El habito construye el resultado.",
+    "No busques rapidez, busca constancia. La rapidez llega sola.",
+    "Cada comida planeada es una decision menos que improvisar.",
+  ],
+  avanzando: [
+    "Vas en marcha. El progreso silencioso tambien cuenta.",
+    "La disciplina de hoy es la libertad de manana.",
+    "Ya no estas empezando: estas sosteniendo. Eso es lo dificil.",
+    "El cuerpo cambia despues que la rutina. Y tu rutina ya cambio.",
+  ],
+  mitad: [
+    "Mitad del camino. Lo que llevas ya no se pierde facil.",
+    "Has demostrado que puedes sostenerlo. Ahora solo repite.",
+    "La segunda mitad se recorre con el impulso de la primera.",
+    "Estas mas cerca de la meta que del punto de partida.",
+  ],
+  cerca: [
+    "Ya se ve la meta. No aflojes justo ahora.",
+    "Lo que falta es menos de lo que ya lograste.",
+    "El ultimo tramo separa a quien lo intenta de quien lo consigue.",
+    "Falta poco. Sostener es la unica tarea.",
+  ],
+  cumplido: [
+    "Meta cumplida. Esto no fue suerte: fue constancia.",
+    "Lo lograste. Ahora el reto es mantener lo ganado.",
+    "Objetivo alcanzado. Tu proximo limite lo pones tu.",
+    "Cumpliste lo que te propusiste. Pocos llegan hasta aqui.",
+  ],
+  estancado: [
+    "Las mesetas son parte del proceso, no el final de el.",
+    "El cuerpo se adapta. Ajustar no es fallar, es corregir el rumbo.",
+    "Un tramo sin cambios no borra el camino recorrido.",
+    "La constancia vence a la meseta. Siempre.",
+  ],
+  retroceso: [
+    "Un paso atras no cancela los que diste adelante.",
+    "El progreso real nunca es una linea recta.",
+    "Retomar hoy vale mas que no haber parado nunca.",
+    "Lo importante no es no caer, es cuanto tardas en volver.",
+  ],
+};
+
+const pickPhrase = (key) => {
+  const arr = PHRASES[key] || PHRASES.inicio;
+  const dayIdx = Math.floor(Date.now() / 86400000);
+  return arr[dayIdx % arr.length];
+};
+
 const safeStore = {
   load() {
     try {
@@ -217,6 +279,15 @@ export default function MacroFit() {
   const [newWeight, setNewWeight] = useState("");
   const [newFeeling, setNewFeeling] = useState("bien");
   const [savedFlash, setSavedFlash] = useState(false);
+  // --- Meta ---
+  const [targetWeight, setTargetWeight] = useState("");
+  const [targetDate, setTargetDate] = useState("");
+  const [startWeight, setStartWeight] = useState(null);
+  const [showGoalModal, setShowGoalModal] = useState(false);
+  const [gwInput, setGwInput] = useState("");
+  const [gdInput, setGdInput] = useState("");
+  const [ringPct, setRingPct] = useState(0);      // valor animado del anillo
+  const [celebrate, setCelebrate] = useState(false);
 
   // Cargar perfil guardado al abrir
   useEffect(() => {
@@ -227,6 +298,9 @@ export default function MacroFit() {
       setGoal(d.goal || "");
       setPrefs(d.prefs || { protein: [], carb: [], fat: [], veg: [], fruit: [] });
       setHistory(d.history || []);
+      setTargetWeight(d.targetWeight || "");
+      setTargetDate(d.targetDate || "");
+      setStartWeight(d.startWeight ?? null);
       setHasProfile(true);
       if (d.goal && d.prefs && d.prefs.protein && d.prefs.protein.length) setStep(4);
     }
@@ -237,8 +311,8 @@ export default function MacroFit() {
   useEffect(() => {
     if (!loaded) return;
     if (!form.weight || !profileName) return;
-    safeStore.save({ profileName, form, goal, prefs, history });
-  }, [loaded, profileName, form, goal, prefs, history]);
+    safeStore.save({ profileName, form, goal, prefs, history, targetWeight, targetDate, startWeight });
+  }, [loaded, profileName, form, goal, prefs, history, targetWeight, targetDate, startWeight]);
 
   const bmr = useMemo(() => {
     const { gender, age, height, weight } = form;
@@ -425,12 +499,114 @@ export default function MacroFit() {
     return { tone: "warn", text: "Tu peso se esta moviendo mas de lo esperado para mantenimiento. Revisa las porciones." };
   }, [stats, goal, form.weight]);
 
+  // ---------- META Y PROGRESO ----------
+  const saveGoalTarget = () => {
+    const tw = parseFloat(String(gwInput).replace(",", "."));
+    if (!tw || tw < 30 || tw > 250) return;
+    setTargetWeight(String(tw));
+    setTargetDate(gdInput || "");
+    // El peso de partida se fija la primera vez
+    if (startWeight === null) {
+      const base = history.length ? [...history].sort((a, b) => a.date.localeCompare(b.date))[0].weight : +form.weight;
+      setStartWeight(base);
+    }
+    setShowGoalModal(false);
+  };
+
+  // Aviso de seguridad: IMC objetivo por debajo de 18.5
+  const goalWarning = useMemo(() => {
+    const tw = parseFloat(String(gwInput).replace(",", "."));
+    const h = +form.height / 100;
+    if (!tw || !h) return null;
+    const imc = tw / (h * h);
+    if (imc < 18.5) return { type: "low", imc: imc.toFixed(1), text: "Ese peso objetivo quedaria por debajo del rango saludable de peso para tu estatura. Vale la pena revisarlo con un profesional de la salud antes de fijarlo." };
+    if (imc > 30) return { type: "high", imc: imc.toFixed(1), text: "Ese peso objetivo queda en un rango alto para tu estatura. Puedes fijarlo igual, pero conviene revisarlo con un profesional." };
+    return null;
+  }, [gwInput, form.height]);
+
+  const goalProgress = useMemo(() => {
+    const tw = parseFloat(targetWeight);
+    const cw = parseFloat(form.weight);
+    if (!tw || !cw) return null;
+    const sw = startWeight !== null ? startWeight : cw;
+    const totalDist = Math.abs(tw - sw);
+    const remaining = +(tw - cw).toFixed(1);
+    const absRemaining = Math.abs(remaining);
+    const done = totalDist > 0 ? Math.min(100, Math.max(0, ((totalDist - absRemaining) / totalDist) * 100)) : (absRemaining < 0.3 ? 100 : 0);
+    const reached = absRemaining <= 0.3;
+
+    // Fecha estimada de llegada segun ritmo real
+    let eta = null;
+    if (stats && stats.perWeek && !reached) {
+      const dir = tw > cw ? 1 : -1;
+      const rate = stats.perWeek;
+      if ((dir > 0 && rate > 0.05) || (dir < 0 && rate < -0.05)) {
+        const weeksNeeded = absRemaining / Math.abs(rate);
+        const d = new Date();
+        d.setDate(d.getDate() + Math.round(weeksNeeded * 7));
+        eta = { weeks: Math.round(weeksNeeded), date: d.toISOString().slice(0, 10) };
+      }
+    }
+    // Dias hasta la fecha deseada
+    let deadline = null;
+    if (targetDate) {
+      const dd = daysBetween(todayISO(), targetDate);
+      deadline = { days: dd, past: dd < 0 };
+    }
+    return { tw, cw, sw, remaining, absRemaining, done: +done.toFixed(1), reached, eta, deadline };
+  }, [targetWeight, targetDate, form.weight, startWeight, stats]);
+
+  // Fase del progreso para elegir la frase adecuada
+  const phaseKey = useMemo(() => {
+    if (!goalProgress) return "sinMeta";
+    if (goalProgress.reached) return "cumplido";
+    const d = goalProgress.done;
+    // retroceso / estancamiento segun ritmo
+    if (stats && stats.perWeek !== null && history.length >= 3) {
+      const goingRight = goalProgress.tw < goalProgress.sw ? stats.perWeek < -0.05 : stats.perWeek > 0.05;
+      const wrongWay = goalProgress.tw < goalProgress.sw ? stats.perWeek > 0.15 : stats.perWeek < -0.15;
+      if (wrongWay) return "retroceso";
+      if (!goingRight && Math.abs(stats.perWeek) < 0.1) return "estancado";
+    }
+    if (d >= 80) return "cerca";
+    if (d >= 45) return "mitad";
+    if (d >= 12) return "avanzando";
+    return "inicio";
+  }, [goalProgress, stats, history.length]);
+
+  const motivation = useMemo(() => pickPhrase(phaseKey), [phaseKey]);
+
+  // Animacion del anillo al entrar a la pestana Progreso
+  useEffect(() => {
+    if (tab !== "prog" || !goalProgress) { setRingPct(0); return; }
+    const target = goalProgress.done;
+    let raf, start = null;
+    const dur = 1100;
+    const ease = (t) => 1 - Math.pow(1 - t, 3);
+    const step = (ts) => {
+      if (start === null) start = ts;
+      const p = Math.min(1, (ts - start) / dur);
+      setRingPct(target * ease(p));
+      if (p < 1) raf = requestAnimationFrame(step);
+      else if (goalProgress.reached) setCelebrate(true);
+    };
+    raf = requestAnimationFrame(step);
+    return () => { if (raf) cancelAnimationFrame(raf); };
+  }, [tab, goalProgress && goalProgress.done, goalProgress && goalProgress.reached]);
+
+  useEffect(() => {
+    if (!celebrate) return;
+    const t = setTimeout(() => setCelebrate(false), 4200);
+    return () => clearTimeout(t);
+  }, [celebrate]);
+
   const resetProfile = () => {
     if (!window.confirm("Esto borrara tu perfil y todo el historial de peso. Esta accion no se puede deshacer. Continuar?")) return;
     safeStore.clear();
     setProfileName(""); setHistory([]); setHasProfile(false);
     setForm({ gender: "", age: "", height: "", weight: "", activity: "" });
     setGoal(""); setPrefs({ protein: [], carb: [], fat: [], veg: [], fruit: [] });
+    setTargetWeight(""); setTargetDate(""); setStartWeight(null);
     setStep(0);
   };
 
@@ -852,6 +1028,70 @@ export default function MacroFit() {
     </div>
   );
 
+  // ---------- ANILLO DE PROGRESO ----------
+  const ProgressRing = ({ pct, reached, size = 168 }) => {
+    const stroke = 14;
+    const r = (size - stroke) / 2;
+    const cx = size / 2, cy = size / 2;
+    const circ = 2 * Math.PI * r;
+    const off = circ * (1 - Math.min(100, Math.max(0, pct)) / 100);
+    const col = reached ? C.success : goal === "def" ? C.warn : goal === "sup" ? C.green : C.blue;
+    return (
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ display: "block" }}>
+        <defs>
+          <linearGradient id="ringgrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stopColor={col} />
+            <stop offset="100%" stopColor={reached ? C.green : C.blue} />
+          </linearGradient>
+        </defs>
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke={C.line} strokeWidth={stroke} />
+        <circle
+          cx={cx} cy={cy} r={r} fill="none"
+          stroke="url(#ringgrad)" strokeWidth={stroke} strokeLinecap="round"
+          strokeDasharray={circ} strokeDashoffset={off}
+          transform={`rotate(-90 ${cx} ${cy})`}
+        />
+        <text x={cx} y={cy - 2} textAnchor="middle" fontSize="34" fontWeight="800" fill={C.text}>
+          {Math.round(pct)}%
+        </text>
+        <text x={cx} y={cy + 20} textAnchor="middle" fontSize="11" fontWeight="700" fill={C.dim}>
+          {reached ? "COMPLETADO" : "DE TU META"}
+        </text>
+      </svg>
+    );
+  };
+
+  // ---------- CONFETI DE CELEBRACION ----------
+  const Confetti = () => {
+    const cols = [C.green, C.blue, C.warn, C.error, "#8B5CF6", C.success];
+    const pieces = Array.from({ length: 42 }, (_, i) => ({
+      id: i,
+      left: (i * 37) % 100,
+      delay: (i % 10) * 0.13,
+      dur: 2.4 + (i % 5) * 0.35,
+      col: cols[i % cols.length],
+      size: 6 + (i % 4) * 3,
+      rot: (i * 47) % 360,
+    }));
+    return (
+      <div style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 60, overflow: "hidden" }}>
+        <style>{`@keyframes mfFall {
+          0% { transform: translateY(-8vh) rotate(0deg); opacity: 1; }
+          100% { transform: translateY(105vh) rotate(720deg); opacity: 0; }
+        }`}</style>
+        {pieces.map((p) => (
+          <div key={p.id} style={{
+            position: "absolute", left: `${p.left}%`, top: 0,
+            width: p.size, height: p.size * 1.6, background: p.col,
+            borderRadius: p.id % 3 === 0 ? "50%" : 2,
+            transform: `rotate(${p.rot}deg)`,
+            animation: `mfFall ${p.dur}s ease-in ${p.delay}s forwards`,
+          }} />
+        ))}
+      </div>
+    );
+  };
+
   // ---------- GRAFICA DE PESO (SVG) ----------
   const WeightChart = ({ data, goalKey }) => {
     if (!data || data.length < 2) return null;
@@ -1246,6 +1486,96 @@ export default function MacroFit() {
 
             {tab === "prog" && (
               <>
+                {/* ---- FRASE MOTIVACIONAL ---- */}
+                <div style={{
+                  ...S.card,
+                  background: `linear-gradient(135deg, ${C.blue}, #0F3557)`,
+                  border: "none", padding: "18px 20px",
+                }}>
+                  <div style={{ fontSize: 10.5, color: "#ffffff99", fontWeight: 700, letterSpacing: ".08em", marginBottom: 6 }}>
+                    {profileName ? profileName.split(" ")[0].toUpperCase() : "HOY"}
+                  </div>
+                  <div style={{ fontSize: 15.5, color: "#fff", fontWeight: 600, lineHeight: 1.5 }}>
+                    {motivation}
+                  </div>
+                </div>
+
+                {/* ---- META Y ANILLO ---- */}
+                <div style={S.card}>
+                  {goalProgress ? (
+                    <>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                        <div style={{ fontSize: 15, fontWeight: 800 }}>🎯 Tu meta</div>
+                        <button onClick={() => { setGwInput(targetWeight); setGdInput(targetDate); setShowGoalModal(true); }}
+                          style={{ background: "transparent", border: "none", color: C.blue, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: FONT }}>
+                          Editar
+                        </button>
+                      </div>
+
+                      <div style={{ display: "flex", justifyContent: "center", padding: "6px 0 12px" }}>
+                        <ProgressRing pct={ringPct} reached={goalProgress.reached} />
+                      </div>
+
+                      {goalProgress.reached ? (
+                        <div style={{ background: C.greenSoft, borderRadius: 12, padding: "14px 16px", textAlign: "center" }}>
+                          <div style={{ fontSize: 22, marginBottom: 4 }}>🏆</div>
+                          <div style={{ fontSize: 15, fontWeight: 800, color: C.green }}>¡Meta alcanzada!</div>
+                          <div style={{ fontSize: 12.5, color: C.dim, marginTop: 3 }}>
+                            Llegaste a {goalProgress.tw} kg. Define una nueva meta cuando quieras.
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <div style={{ flex: 1, background: C.bg, borderRadius: 10, padding: "10px 12px", textAlign: "center" }}>
+                            <div style={{ fontSize: 10.5, color: C.dim, fontWeight: 700 }}>OBJETIVO</div>
+                            <div style={{ fontSize: 18, fontWeight: 800, color: C.text }}>{goalProgress.tw} kg</div>
+                          </div>
+                          <div style={{ flex: 1, background: C.bg, borderRadius: 10, padding: "10px 12px", textAlign: "center" }}>
+                            <div style={{ fontSize: 10.5, color: C.dim, fontWeight: 700 }}>TE FALTA</div>
+                            <div style={{ fontSize: 18, fontWeight: 800, color: C.green }}>
+                              {goalProgress.absRemaining.toFixed(1)} kg
+                            </div>
+                          </div>
+                          {goalProgress.eta && (
+                            <div style={{ flex: 1, background: C.bg, borderRadius: 10, padding: "10px 12px", textAlign: "center" }}>
+                              <div style={{ fontSize: 10.5, color: C.dim, fontWeight: 700 }}>ESTIMADO</div>
+                              <div style={{ fontSize: 18, fontWeight: 800, color: C.blue }}>{goalProgress.eta.weeks}</div>
+                              <div style={{ fontSize: 9.5, color: C.faint }}>semanas</div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {goalProgress.deadline && !goalProgress.reached && (
+                        <div style={{ marginTop: 10, fontSize: 12, color: C.dim, textAlign: "center" }}>
+                          {goalProgress.deadline.past
+                            ? `Tu fecha objetivo (${fmtDate(targetDate)}) ya pasó. Puedes ajustarla desde Editar.`
+                            : `Fecha objetivo: ${fmtDate(targetDate)} · faltan ${goalProgress.deadline.days} días`}
+                          {goalProgress.eta && !goalProgress.deadline.past && (
+                            <div style={{ marginTop: 4, fontWeight: 700, color: goalProgress.eta.weeks * 7 <= goalProgress.deadline.days ? C.green : C.warn }}>
+                              {goalProgress.eta.weeks * 7 <= goalProgress.deadline.days
+                                ? "✓ A tu ritmo actual, llegas a tiempo"
+                                : "⚠ A tu ritmo actual, llegarías después de esa fecha"}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div style={{ textAlign: "center", padding: "20px 10px" }}>
+                      <div style={{ fontSize: 34, marginBottom: 8 }}>🎯</div>
+                      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>Define tu meta</div>
+                      <div style={{ fontSize: 13, color: C.dim, lineHeight: 1.5, marginBottom: 16 }}>
+                        Un objetivo concreto convierte el esfuerzo en dirección. Ingresa tu peso objetivo y cuándo quieres alcanzarlo.
+                      </div>
+                      <button onClick={() => { setGwInput(""); setGdInput(""); setShowGoalModal(true); }} style={{
+                        background: C.green, color: "#fff", border: "none", borderRadius: 12,
+                        padding: "13px 22px", fontWeight: 700, fontSize: 15, cursor: "pointer", fontFamily: FONT,
+                      }}>Establecer meta</button>
+                    </div>
+                  )}
+                </div>
+
                 {/* Tarjeta principal de peso */}
                 <div style={S.card}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
@@ -1384,6 +1714,58 @@ export default function MacroFit() {
           </div>
         )}
       </div>
+
+
+      {/* ---- CONFETI DE CELEBRACION ---- */}
+      {celebrate && <Confetti />}
+
+      {/* ---- MODAL: DEFINIR META ---- */}
+      {showGoalModal && (
+        <div onClick={() => setShowGoalModal(false)} style={{
+          position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 55,
+          display: "flex", alignItems: "flex-end", justifyContent: "center",
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            background: C.card, width: "100%", maxWidth: 620, borderRadius: "20px 20px 0 0",
+            padding: 22, boxShadow: "0 -8px 32px rgba(15,23,42,0.18)", maxHeight: "88vh", overflowY: "auto",
+          }}>
+            <div style={{ width: 40, height: 4, background: C.line, borderRadius: 4, margin: "0 auto 16px" }} />
+            <div style={{ fontSize: 19, fontWeight: 800, marginBottom: 4 }}>🎯 Tu meta</div>
+            <div style={{ fontSize: 13, color: C.dim, marginBottom: 18, lineHeight: 1.5 }}>
+              Peso actual: <strong>{form.weight} kg</strong>. Define a dónde quieres llegar y para cuándo.
+            </div>
+
+            <label style={S.label}>Peso objetivo (kg)</label>
+            <input autoFocus style={{ ...S.input, fontSize: 24, fontWeight: 800, textAlign: "center", marginBottom: 14 }}
+              type="number" inputMode="decimal" step="0.1" value={gwInput}
+              onChange={(e) => setGwInput(e.target.value)} placeholder="68" />
+
+            {goalWarning && (
+              <div style={{
+                background: goalWarning.type === "low" ? "#FEF3E2" : "#FEF3E2",
+                border: `1px solid ${C.warn}44`, borderRadius: 12, padding: "12px 14px", marginBottom: 14,
+              }}>
+                <div style={{ fontSize: 12.5, fontWeight: 800, color: C.warn, marginBottom: 3 }}>
+                  ⚠ IMC objetivo: {goalWarning.imc}
+                </div>
+                <div style={{ fontSize: 12, color: C.text, lineHeight: 1.45 }}>{goalWarning.text}</div>
+              </div>
+            )}
+
+            <label style={S.label}>¿Para cuándo? (opcional)</label>
+            <input style={{ ...S.input, marginBottom: 8 }} type="date" value={gdInput}
+              min={todayISO()} onChange={(e) => setGdInput(e.target.value)} />
+            <p style={{ fontSize: 11.5, color: C.faint, margin: "0 0 18px", lineHeight: 1.45 }}>
+              Si pones una fecha, MacroFit te dirá si tu ritmo actual te permite llegar a tiempo.
+            </p>
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <Btn ghost onClick={() => setShowGoalModal(false)}>Cancelar</Btn>
+              <Btn onClick={saveGoalTarget} disabled={!gwInput}>Guardar meta</Btn>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ---- MODAL: REGISTRAR PESO ---- */}
       {showWeighIn && (
