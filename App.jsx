@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 
 // ============================================================
 //  MacroFit — Nutrición inteligente. Resultados reales.
@@ -151,6 +151,47 @@ function scaleFood(food, targetKcal) {
   };
 }
 
+
+// ============================================================
+//  PERSISTENCIA LOCAL  (localStorage)
+//  Nota: dentro del chat de Claude el storage esta bloqueado;
+//  funciona con normalidad al publicar la app (Vercel).
+// ============================================================
+const STORE_KEY = "macrofit_perfil_v1";
+
+const FEELINGS = [
+  { id: "genial", emoji: "\u{1F525}", label: "Genial", desc: "Con energia y sin hambre", color: "#18B66A" },
+  { id: "bien", emoji: "\u{1F642}", label: "Bien", desc: "Normal, sostenible", color: "#22C55E" },
+  { id: "cansado", emoji: "\u{1F615}", label: "Cansado", desc: "Con poca energia", color: "#F59E0B" },
+  { id: "hambre", emoji: "\u{1F61F}", label: "Con hambre", desc: "Me cuesta seguirlo", color: "#EF4444" },
+];
+
+const safeStore = {
+  load() {
+    try {
+      const raw = window.localStorage.getItem(STORE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  },
+  save(data) {
+    try {
+      window.localStorage.setItem(STORE_KEY, JSON.stringify(data));
+      return true;
+    } catch (e) { return false; }
+  },
+  clear() {
+    try { window.localStorage.removeItem(STORE_KEY); return true; } catch (e) { return false; }
+  },
+};
+
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const fmtDate = (iso) => {
+  const [y, m, d] = iso.split("-");
+  const meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+  return `${+d} ${meses[+m - 1]}`;
+};
+const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
+
 const Logo = ({ size = 44, radius = 12 }) => (
   <svg width={size} height={size} viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
     <rect width="48" height="48" rx={radius} fill="#18B66A" />
@@ -167,6 +208,37 @@ export default function MacroFit() {
   const [pdfState, setPdfState] = useState("idle");
   const [seed, setSeed] = useState(0);
   const [tab, setTab] = useState("menu");
+  // --- Perfil y seguimiento ---
+  const [profileName, setProfileName] = useState("");
+  const [history, setHistory] = useState([]); // [{date, weight, feeling}]
+  const [loaded, setLoaded] = useState(false);
+  const [hasProfile, setHasProfile] = useState(false);
+  const [showWeighIn, setShowWeighIn] = useState(false);
+  const [newWeight, setNewWeight] = useState("");
+  const [newFeeling, setNewFeeling] = useState("bien");
+  const [savedFlash, setSavedFlash] = useState(false);
+
+  // Cargar perfil guardado al abrir
+  useEffect(() => {
+    const d = safeStore.load();
+    if (d && d.form && d.form.weight) {
+      setProfileName(d.profileName || "");
+      setForm(d.form);
+      setGoal(d.goal || "");
+      setPrefs(d.prefs || { protein: [], carb: [], fat: [], veg: [], fruit: [] });
+      setHistory(d.history || []);
+      setHasProfile(true);
+      if (d.goal && d.prefs && d.prefs.protein && d.prefs.protein.length) setStep(4);
+    }
+    setLoaded(true);
+  }, []);
+
+  // Guardar automaticamente cada cambio relevante
+  useEffect(() => {
+    if (!loaded) return;
+    if (!form.weight || !profileName) return;
+    safeStore.save({ profileName, form, goal, prefs, history });
+  }, [loaded, profileName, form, goal, prefs, history]);
 
   const bmr = useMemo(() => {
     const { gender, age, height, weight } = form;
@@ -295,6 +367,72 @@ export default function MacroFit() {
     build("fat", "Grasas", [50, 100, 150]);
     return groups;
   }, [menu, prefs]);
+
+  // ---------- SEGUIMIENTO DE PESO ----------
+  const registerWeight = () => {
+    const w = parseFloat(String(newWeight).replace(",", "."));
+    if (!w || w < 25 || w > 300) return;
+    const date = todayISO();
+    const entry = { date, weight: w, feeling: newFeeling };
+    setHistory((h) => {
+      const without = h.filter((x) => x.date !== date);
+      return [...without, entry].sort((a, b) => a.date.localeCompare(b.date));
+    });
+    // Recalculo automatico: actualiza el peso del perfil
+    setForm((f) => ({ ...f, weight: String(w) }));
+    setNewWeight("");
+    setShowWeighIn(false);
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 2200);
+  };
+
+  const stats = useMemo(() => {
+    if (!history.length) return null;
+    const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
+    const first = sorted[0], last = sorted[sorted.length - 1];
+    const change = +(last.weight - first.weight).toFixed(1);
+    const days = daysBetween(first.date, last.date);
+    const weeks = days / 7;
+    const perWeek = weeks >= 1 ? +(change / weeks).toFixed(2) : null;
+    let prevDiff = null;
+    if (sorted.length >= 2) {
+      const prev = sorted[sorted.length - 2];
+      prevDiff = { diff: +(last.weight - prev.weight).toFixed(1), days: daysBetween(prev.date, last.date) };
+    }
+    const weights = sorted.map((x) => x.weight);
+    return {
+      sorted, first, last, change, days, perWeek, prevDiff,
+      min: Math.min(...weights), max: Math.max(...weights), count: sorted.length,
+    };
+  }, [history]);
+
+  // Lectura inteligente del progreso segun objetivo
+  const progressInsight = useMemo(() => {
+    if (!stats || !stats.perWeek || !goal) return null;
+    const pw = stats.perWeek;
+    const pct = form.weight ? (Math.abs(pw) / +form.weight) * 100 : 0;
+    if (goal === "def") {
+      if (pw >= 0) return { tone: "warn", text: "No estas bajando de peso. Revisa las porciones o aumenta un poco la actividad antes de recortar mas calorias." };
+      if (pct > 1.0) return { tone: "warn", text: "Estas bajando rapido (mas de 1% del peso por semana). A este ritmo hay mas riesgo de perder musculo: considera subir un poco las calorias." };
+      return { tone: "ok", text: "Ritmo de perdida adecuado. Estas en el rango que preserva masa muscular." };
+    }
+    if (goal === "sup") {
+      if (pw <= 0) return { tone: "warn", text: "No estas ganando peso. Si buscas musculo, sube un poco los carbohidratos." };
+      if (pct > 0.7) return { tone: "warn", text: "Estas subiendo rapido: buena parte podria ser grasa. Considera moderar el superavit." };
+      return { tone: "ok", text: "Ganancia controlada, ideal para priorizar musculo sobre grasa." };
+    }
+    if (Math.abs(pw) < 0.3) return { tone: "ok", text: "Peso estable, justo lo que buscas en mantenimiento." };
+    return { tone: "warn", text: "Tu peso se esta moviendo mas de lo esperado para mantenimiento. Revisa las porciones." };
+  }, [stats, goal, form.weight]);
+
+  const resetProfile = () => {
+    if (!window.confirm("Esto borrara tu perfil y todo el historial de peso. Esta accion no se puede deshacer. Continuar?")) return;
+    safeStore.clear();
+    setProfileName(""); setHistory([]); setHasProfile(false);
+    setForm({ gender: "", age: "", height: "", weight: "", activity: "" });
+    setGoal(""); setPrefs({ protein: [], carb: [], fat: [], veg: [], fruit: [] });
+    setStep(0);
+  };
 
   const togglePref = (cat, id) =>
     setPrefs((p) => ({ ...p, [cat]: p[cat].includes(id) ? p[cat].filter((x) => x !== id) : [...p[cat], id] }));
@@ -714,6 +852,68 @@ export default function MacroFit() {
     </div>
   );
 
+  // ---------- GRAFICA DE PESO (SVG) ----------
+  const WeightChart = ({ data, goalKey }) => {
+    if (!data || data.length < 2) return null;
+    const w = 560, h = 200, pad = { t: 18, r: 16, b: 28, l: 38 };
+    const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
+    const ws = data.map((d) => d.weight);
+    let min = Math.min(...ws), max = Math.max(...ws);
+    const span = Math.max(1.5, max - min);
+    min = min - span * 0.25; max = max + span * 0.25;
+    const t0 = new Date(data[0].date).getTime();
+    const t1 = new Date(data[data.length - 1].date).getTime();
+    const dx = (d) => {
+      if (t1 === t0) return pad.l + iw / 2;
+      return pad.l + ((new Date(d.date).getTime() - t0) / (t1 - t0)) * iw;
+    };
+    const dy = (v) => pad.t + ih - ((v - min) / (max - min)) * ih;
+    const pts = data.map((d) => [dx(d), dy(d.weight)]);
+    const line = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+    const area = `${line} L${pts[pts.length - 1][0].toFixed(1)},${pad.t + ih} L${pts[0][0].toFixed(1)},${pad.t + ih} Z`;
+    const ticks = 4;
+    const gridVals = Array.from({ length: ticks + 1 }, (_, i) => min + ((max - min) * i) / ticks);
+    const stroke = goalKey === "def" ? C.warn : goalKey === "sup" ? C.green : C.blue;
+
+    return (
+      <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: "auto", display: "block" }}>
+        <defs>
+          <linearGradient id="wgrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={stroke} stopOpacity="0.22" />
+            <stop offset="100%" stopColor={stroke} stopOpacity="0.02" />
+          </linearGradient>
+        </defs>
+        {gridVals.map((v, i) => (
+          <g key={i}>
+            <line x1={pad.l} y1={dy(v)} x2={w - pad.r} y2={dy(v)} stroke={C.line} strokeWidth="1" />
+            <text x={pad.l - 7} y={dy(v) + 3.5} textAnchor="end" fontSize="9" fill={C.faint} fontWeight="600">
+              {v.toFixed(1)}
+            </text>
+          </g>
+        ))}
+        <path d={area} fill="url(#wgrad)" />
+        <path d={line} fill="none" stroke={stroke} strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+        {pts.map((p, i) => {
+          const feel = FEELINGS.find((f) => f.id === data[i].feeling);
+          return (
+            <g key={i}>
+              <circle cx={p[0]} cy={p[1]} r="5.5" fill="#fff" stroke={stroke} strokeWidth="2.4" />
+              {feel && <circle cx={p[0]} cy={p[1]} r="2.2" fill={feel.color} />}
+            </g>
+          );
+        })}
+        {data.map((d, i) => {
+          if (data.length > 7 && i % Math.ceil(data.length / 6) !== 0 && i !== data.length - 1) return null;
+          return (
+            <text key={i} x={dx(d)} y={h - 8} textAnchor="middle" fontSize="8.5" fill={C.faint} fontWeight="600">
+              {fmtDate(d.date)}
+            </text>
+          );
+        })}
+      </svg>
+    );
+  };
+
   const Stepper = () => (
     <div style={{ display: "flex", gap: 6, marginBottom: 22 }}>
       {[0, 1, 2, 3, 4].map((i) => (
@@ -742,7 +942,9 @@ export default function MacroFit() {
             <div style={{ fontSize: 12.5, color: C.green, fontWeight: 700, letterSpacing: "-0.01em" }}>Nutrición inteligente. Resultados reales.</div>
           </div>
         </div>
-        <p style={{ color: C.dim, fontSize: 14, margin: "10px 0 18px" }}>Tu asistente de nutrición, calculado con base científica.</p>
+        <p style={{ color: C.dim, fontSize: 14, margin: "10px 0 18px" }}>
+          {profileName ? `Hola, ${profileName.split(" ")[0]}. ` : ""}Tu asistente de nutrición, calculado con base científica.
+        </p>
         <Stepper />
       </div>
 
@@ -750,6 +952,9 @@ export default function MacroFit() {
         {step === 0 && (
           <>
             <div style={S.card}>
+              <label style={S.label}>Tu nombre</label>
+              <input style={{ ...S.input, marginBottom: 16 }} type="text" value={profileName}
+                onChange={(e) => setProfileName(e.target.value)} placeholder="Fabián Leal" />
               <label style={S.label}>Género</label>
               <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
                 {[["m", "Hombre"], ["f", "Mujer"]].map(([k, l]) => (
@@ -791,7 +996,7 @@ export default function MacroFit() {
                 <div style={{ fontSize: 13, color: C.dim }}>kcal / día · Mifflin-St Jeor</div>
               </div>
             )}
-            <Btn onClick={() => setStep(1)} disabled={!canCalc}>Continuar →</Btn>
+            <Btn onClick={() => setStep(1)} disabled={!canCalc || !profileName.trim()}>Continuar →</Btn>
           </>
         )}
 
@@ -914,7 +1119,8 @@ export default function MacroFit() {
             <div style={{ display: "flex", gap: 4, background: C.card, border: `1px solid ${C.line}`, borderRadius: 14, padding: 4, marginBottom: 14 }}>
               <TabBtn id="menu">Menú</TabBtn>
               <TabBtn id="compras">🛒 Compras</TabBtn>
-              <TabBtn id="equiv">🔀 Equivalencias</TabBtn>
+              <TabBtn id="equiv">🔀 Equiv.</TabBtn>
+              <TabBtn id="prog">📈 Progreso</TabBtn>
             </div>
 
             {tab === "menu" && (
@@ -1038,6 +1244,129 @@ export default function MacroFit() {
               </div>
             )}
 
+            {tab === "prog" && (
+              <>
+                {/* Tarjeta principal de peso */}
+                <div style={S.card}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+                    <div>
+                      <div style={{ fontSize: 11, color: C.dim, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em" }}>Peso actual</div>
+                      <div style={{ fontSize: 38, fontWeight: 800, color: C.text, lineHeight: 1.1 }}>
+                        {form.weight} <span style={{ fontSize: 18, color: C.dim, fontWeight: 700 }}>kg</span>
+                      </div>
+                      {stats && stats.prevDiff && (
+                        <div style={{ fontSize: 12.5, fontWeight: 700, color: stats.prevDiff.diff === 0 ? C.dim : stats.prevDiff.diff < 0 ? C.green : C.warn }}>
+                          {stats.prevDiff.diff > 0 ? "▲ +" : stats.prevDiff.diff < 0 ? "▼ " : "= "}
+                          {stats.prevDiff.diff !== 0 ? `${Math.abs(stats.prevDiff.diff)} kg` : "sin cambio"}
+                          <span style={{ color: C.faint, fontWeight: 500 }}> · {stats.prevDiff.days} días</span>
+                        </div>
+                      )}
+                    </div>
+                    <button onClick={() => { setNewWeight(form.weight); setShowWeighIn(true); }} style={{
+                      background: C.green, color: "#fff", border: "none", borderRadius: 12,
+                      padding: "12px 16px", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: FONT,
+                    }}>⚖️ Registrar peso</button>
+                  </div>
+
+                  {savedFlash && (
+                    <div style={{ background: C.greenSoft, border: `1px solid ${C.green}44`, borderRadius: 12, padding: "10px 14px", marginBottom: 12 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: C.green }}>✓ Peso registrado y macros recalculados</div>
+                      <div style={{ fontSize: 12, color: C.dim, marginTop: 2 }}>
+                        Nuevo objetivo: {targetKcal} kcal · P{macros.p}g C{macros.c}g G{macros.f}g
+                      </div>
+                    </div>
+                  )}
+
+                  {stats && stats.count >= 2 ? (
+                    <>
+                      <WeightChart data={stats.sorted} goalKey={goal} />
+                      <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                        <div style={{ flex: 1, background: C.bg, borderRadius: 10, padding: "10px 12px" }}>
+                          <div style={{ fontSize: 10.5, color: C.dim, fontWeight: 700 }}>CAMBIO TOTAL</div>
+                          <div style={{ fontSize: 19, fontWeight: 800, color: stats.change < 0 ? C.green : stats.change > 0 ? C.blue : C.dim }}>
+                            {stats.change > 0 ? "+" : ""}{stats.change} kg
+                          </div>
+                          <div style={{ fontSize: 10, color: C.faint }}>en {stats.days} días</div>
+                        </div>
+                        <div style={{ flex: 1, background: C.bg, borderRadius: 10, padding: "10px 12px" }}>
+                          <div style={{ fontSize: 10.5, color: C.dim, fontWeight: 700 }}>POR SEMANA</div>
+                          <div style={{ fontSize: 19, fontWeight: 800, color: C.text }}>
+                            {stats.perWeek !== null ? `${stats.perWeek > 0 ? "+" : ""}${stats.perWeek}` : "—"}
+                            <span style={{ fontSize: 12, color: C.dim }}> kg</span>
+                          </div>
+                          <div style={{ fontSize: 10, color: C.faint }}>promedio</div>
+                        </div>
+                        <div style={{ flex: 1, background: C.bg, borderRadius: 10, padding: "10px 12px" }}>
+                          <div style={{ fontSize: 10.5, color: C.dim, fontWeight: 700 }}>REGISTROS</div>
+                          <div style={{ fontSize: 19, fontWeight: 800, color: C.text }}>{stats.count}</div>
+                          <div style={{ fontSize: 10, color: C.faint }}>pesajes</div>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div style={{ textAlign: "center", padding: "24px 12px", background: C.bg, borderRadius: 12 }}>
+                      <div style={{ fontSize: 30, marginBottom: 6 }}>📈</div>
+                      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>Aún no hay tendencia</div>
+                      <div style={{ fontSize: 12.5, color: C.dim, lineHeight: 1.5 }}>
+                        Registra tu peso cada 7–15 días. Con dos o más registros verás tu gráfica de evolución.
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Lectura del progreso */}
+                {progressInsight && (
+                  <div style={{ ...S.card, background: progressInsight.tone === "ok" ? C.greenSoft : "#FEF3E2", border: `1px solid ${progressInsight.tone === "ok" ? C.green : C.warn}33` }}>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: progressInsight.tone === "ok" ? C.green : C.warn, marginBottom: 4 }}>
+                      {progressInsight.tone === "ok" ? "✓ Vas bien" : "⚠ Atención"}
+                    </div>
+                    <div style={{ fontSize: 13, color: C.text, lineHeight: 1.5 }}>{progressInsight.text}</div>
+                  </div>
+                )}
+
+                {/* Historial */}
+                {stats && (
+                  <div style={S.card}>
+                    <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 10 }}>Historial</div>
+                    {[...stats.sorted].reverse().map((h, i, arr) => {
+                      const feel = FEELINGS.find((f) => f.id === h.feeling);
+                      const next = arr[i + 1];
+                      const diff = next ? +(h.weight - next.weight).toFixed(1) : null;
+                      return (
+                        <div key={h.date} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderTop: i ? `1px solid ${C.line}` : "none" }}>
+                          <div style={{ fontSize: 20 }}>{feel ? feel.emoji : "⚪"}</div>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 14, fontWeight: 700 }}>{h.weight} kg</div>
+                            <div style={{ fontSize: 11.5, color: C.faint }}>
+                              {fmtDate(h.date)}{feel ? ` · ${feel.label}` : ""}
+                            </div>
+                          </div>
+                          {diff !== null && (
+                            <div style={{ fontSize: 12.5, fontWeight: 700, color: diff < 0 ? C.green : diff > 0 ? C.blue : C.faint }}>
+                              {diff > 0 ? "+" : ""}{diff !== 0 ? `${diff} kg` : "="}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Gestion del perfil */}
+                <div style={{ ...S.card, borderStyle: "dashed" }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 6 }}>Tu perfil</div>
+                  <div style={{ fontSize: 12.5, color: C.dim, lineHeight: 1.5, marginBottom: 12 }}>
+                    {profileName || "Sin nombre"} · {form.age} años · {form.height} cm.
+                    Tus datos se guardan solo en este dispositivo, nunca salen de tu navegador.
+                  </div>
+                  <button onClick={resetProfile} style={{
+                    background: "transparent", color: C.error, border: `1.5px solid ${C.error}44`,
+                    borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: FONT,
+                  }}>Borrar perfil e historial</button>
+                </div>
+              </>
+            )}
+
             <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
               <Btn ghost onClick={() => setStep(2)}>Cambiar comidas</Btn>
               <Btn onClick={() => setStep(0)}>Empezar de nuevo</Btn>
@@ -1055,6 +1384,54 @@ export default function MacroFit() {
           </div>
         )}
       </div>
+
+      {/* ---- MODAL: REGISTRAR PESO ---- */}
+      {showWeighIn && (
+        <div onClick={() => setShowWeighIn(false)} style={{
+          position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 50,
+          display: "flex", alignItems: "flex-end", justifyContent: "center", padding: 0,
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            background: C.card, width: "100%", maxWidth: 620, borderRadius: "20px 20px 0 0",
+            padding: 22, boxShadow: "0 -8px 32px rgba(15,23,42,0.18)", maxHeight: "88vh", overflowY: "auto",
+          }}>
+            <div style={{ width: 40, height: 4, background: C.line, borderRadius: 4, margin: "0 auto 16px" }} />
+            <div style={{ fontSize: 19, fontWeight: 800, marginBottom: 4 }}>Registrar peso</div>
+            <div style={{ fontSize: 13, color: C.dim, marginBottom: 18 }}>
+              Pésate en ayunas, después del baño y antes de desayunar. Así los datos son comparables.
+            </div>
+
+            <label style={S.label}>Peso de hoy (kg)</label>
+            <input autoFocus style={{ ...S.input, fontSize: 24, fontWeight: 800, textAlign: "center", marginBottom: 18 }}
+              type="number" inputMode="decimal" step="0.1" value={newWeight}
+              onChange={(e) => setNewWeight(e.target.value)} placeholder="70.5" />
+
+            <label style={S.label}>¿Cómo te has sentido?</label>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 20 }}>
+              {FEELINGS.map((f) => (
+                <button key={f.id} onClick={() => setNewFeeling(f.id)} style={{
+                  background: newFeeling === f.id ? f.color : C.card,
+                  color: newFeeling === f.id ? "#fff" : C.text,
+                  border: `1.5px solid ${newFeeling === f.id ? f.color : C.line}`,
+                  borderRadius: 14, padding: "12px 10px", cursor: "pointer", textAlign: "left", fontFamily: FONT,
+                }}>
+                  <div style={{ fontSize: 18, marginBottom: 2 }}>{f.emoji}</div>
+                  <div style={{ fontSize: 13.5, fontWeight: 700 }}>{f.label}</div>
+                  <div style={{ fontSize: 10.5, opacity: .75, lineHeight: 1.3 }}>{f.desc}</div>
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <Btn ghost onClick={() => setShowWeighIn(false)}>Cancelar</Btn>
+              <Btn onClick={registerWeight} disabled={!newWeight}>Guardar</Btn>
+            </div>
+            <p style={{ fontSize: 11, color: C.faint, textAlign: "center", marginTop: 12, lineHeight: 1.45 }}>
+              Al guardar, tus calorías y macros se recalculan automáticamente con el nuevo peso.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
